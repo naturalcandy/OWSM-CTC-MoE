@@ -1,0 +1,30 @@
+name: owsm-ctc-moe
+channels:
+  - conda-forge
+  - nvidia
+dependencies:
+  - python=3.10
+  - cuda-toolkit=12.1
+  - ninja              # only if using flash attention
+  - sox
+  - ffmpeg
+  - pip
+  - pip:
+      - espnet
+      - espnet_model_zoo
+      - psutil
+      - librosa
+      - soundfile
+      - jiwer
+      - tqdm
+      - rich
+      - pandas
+      - matplotlib
+      - seaborn
+      - pyyaml
+      - sentencepiece
+      - tensorboard        # For training monitoring
+      - einops             # Needed by some ESPnet modules
+      - editdistance       # For CER calculation
+      - kaldiio            # ESPnet dependency
+      - scipy              # For audio processing
