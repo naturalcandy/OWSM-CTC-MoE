@@ -11,4 +11,4 @@ s2t = Speech2TextGreedySearch.from_pretrained(
 
 model = s2t.s2t_model
 total_params = sum(p.numel() for p in model.parameters())
-print(f"✓ Model loaded: {total_params/1e9:.2f}B parameters")
+print(f"Model loaded: {total_params/1e9:.2f}B parameters")

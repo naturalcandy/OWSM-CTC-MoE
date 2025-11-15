@@ -29,6 +29,7 @@ from utils import (
     get_gpu_memory_mb,
     reset,
     normalize_text,
+    extract_output
 )
 
 
@@ -51,16 +52,25 @@ class BaselineBenchmark:
         
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
+        # DOES BF16 WORK?
         print(f"Loading OWSM-CTC model: {model_name}")
         
-        self.model = Speech2TextGreedySearch.from_pretrained(
-            model_name,
-            device=device,
-            lang_sym="<eng>",
-            task_sym="<asr>",
-            use_flash_attn=use_flash_attn,
-        )
-        
+        if use_flash_attn:
+            self.model = Speech2TextGreedySearch.from_pretrained(
+                model_name,
+                device=device,
+                lang_sym="<eng>",
+                task_sym="<asr>",
+                use_flash_attn=True,
+                dtype="float16",
+            )
+        else:
+            self.model = Speech2TextGreedySearch.from_pretrained(
+                model_name,
+                device=device,
+                lang_sym="<eng>",
+                task_sym="<asr>",
+            )
         print(f"Model loaded")
         print(f"Flash Attention: {use_flash_attn}")
         print(f"Device: {device}")
@@ -109,10 +119,19 @@ class BaselineBenchmark:
         ref = []
         hyp = []
         with torch.inference_mode():
-            for audio, sr, ref_text in tqdm(samples, desc="Inference"):
-                # Inference
-                hyp_text = self.model(audio)[0]
+            for i, (audio, sr, ref_text) in enumerate(tqdm(samples, desc="Inference")):
+                result = self.model(audio)
+
+                hyp_text = extract_output(result)
                 hyp_text_norm = normalize_text(hyp_text)
+
+                if i == 0:
+                    print(f"\n=== DEBUG FIRST SAMPLE ===")
+                    print(f"Reference (raw): '{ref_text}'")
+                    print(f"Hypothesis (raw): '{hyp_text}'")
+                    print(f"Hypothesis (norm): '{hyp_text_norm}'")
+                    print(f"Match? {ref_text == hyp_text_norm}")
+                    print(f"==========================\n")
                 
                 ref.append(ref_text)
                 hyp.append(hyp_text_norm)
@@ -302,7 +321,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Create benchmark
     benchmark = BaselineBenchmark(
         model_name=args.model,
         device=args.device,
@@ -311,7 +329,6 @@ def main():
         use_flash_attn=not args.no_flash_attn,
     )
     
-    # Run requested tests
     if args.test == "all":
         results = benchmark.run_full()
     elif args.test == "wer":

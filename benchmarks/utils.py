@@ -59,3 +59,28 @@ def normalize_text(text: str) -> str:
     text = re.sub(r'[^\w\s]', '', text)
     text = ' '.join(text.split())
     return text
+
+def extract_output(result):
+    """    
+    Output structure:
+    [
+        (
+            '<eng><asr> text...',  # [0][0] - with prefix
+            tokens,                # [0][1]
+            token_ids,             # [0][2]
+            'text...',             # [0][3] - clean text
+            score                  # [0][4]
+        )
+    ]
+    Args:
+        result: Output from Speech2TextGreedySearch
+    Returns:
+        str: Clean transcription text
+    """
+    if isinstance(result, list) and len(result) > 0:
+        f = result[0]
+        if isinstance(f, tuple) and len(f) >= 4:
+            # Index [3] is clean text
+            return f[3]
+        return str(f)
+    return str(result)
