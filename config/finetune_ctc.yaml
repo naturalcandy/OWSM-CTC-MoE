@@ -1,0 +1,57 @@
+# Hardware: A100 40GB - OWSM-CTC 1B fine-tuning on LibriSpeech-100h
+
+seed: 2025
+train_dtype: float32    
+use_amp: true
+multiple_iterator: false     
+allow_variable_data_keys: true
+
+
+ngpu: 1
+num_workers: 4
+cudnn_benchmark: true
+cudnn_deterministic: false
+use_tensorboard: true
+log_interval: 50          
+
+batch_type: unsorted
+batch_size: 8     
+accum_grad: 2            
+
+max_epoch: 20
+num_iters_per_epoch: 2000
+patience: 5             
+keep_nbest_models: 3      
+val_scheduler_criterion:
+  - valid
+  - loss
+best_model_criterion:
+  - - valid
+    - acc
+    - max
+
+optim: adamw
+optim_conf:
+  lr: 0.0001              
+  betas: [0.9, 0.98]
+  eps: 1.0e-06
+  weight_decay: 1.0e-06
+  fused: true
+
+scheduler: piecewiselinearwarmuplr
+scheduler_conf:
+  warmup_steps_list: [0, 2000, 10000]
+  warmup_lr_list: [0.0, 2.5e-05, 0.0001]
+
+grad_clip: 5.0
+grad_clip_type: 2.0   
+
+specaug: specaug
+specaug_conf:
+  apply_time_warp: false
+  apply_freq_mask: true
+  freq_mask_width_range: [0, 27]
+  num_freq_mask: 2
+  apply_time_mask: true
+  time_mask_width_ratio_range: [0.0, 0.05]
+  num_time_mask: 5
