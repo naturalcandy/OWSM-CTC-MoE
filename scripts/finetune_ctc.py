@@ -10,7 +10,7 @@ import torchaudio
 import espnetez as ez
 from espnet2.bin.s2t_inference_ctc import Speech2TextGreedySearch
 
-# Inspired from EspnetEZ finetuning tutorial:
+# Sourced from EspnetEZ finetuning tutorial:
 # https://espnet.github.io/espnet/notebook/ESPnetEZ/ASR/ASR_finetune_owsm.html
 
 def count_trainable(model):
@@ -26,8 +26,6 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--lang", type=str, default="eng")
     parser.add_argument("--config", type=Path, default=Path("config/finetune_ctc.yaml"))
-    parser.add_argument("--max_epoch", type=int, default=None)
-    parser.add_argument("--iters_per_epoch", type=int, default=None)
     args = parser.parse_args()
     
     args.exp_dir.mkdir(parents=True, exist_ok=True)
@@ -46,10 +44,12 @@ def main():
     )
     torch.save(s2t.s2t_model.state_dict(), args.exp_dir / "original.pth")
     print(f"Saved original weights")
+    
     pretrain_config = vars(s2t.s2t_train_args)
     tokenizer = s2t.tokenizer
     converter = s2t.converter
-    pretrained_model = s2t  
+    pretrained_model = s2t
+    
     def tokenize(text):
         return np.array(converter.tokens2ids(tokenizer.text2tokens(text)))
     
@@ -62,13 +62,28 @@ def main():
             ).numpy().astype(np.float32)
         return audio
     
+    def get_transcript(sample):
+        """
+        Normalize LibriSpeech transcript to match OWSM-CTC output format.
+        
+        Model outputs: "He hoped there would be stew for dinner, ..."
+        So we train on: "he hoped there would be stew for dinner, ..."
+        """
+        _, _, transcript, *_ = sample
+        transcript = transcript.lower()
+        if not transcript.endswith('.'):
+            transcript = transcript + '.'
+        return transcript
+    
     data_info = {
-    "speech": lambda d: to_speech(d),
-    "text": lambda d: tokenize(f"<{args.lang}><asr><notimestamps> {d[2]}"),
-    "text_prev": lambda d: tokenize("<na>"),
-    "text_ctc": lambda d: tokenize(d[2]),
-    "prefix": lambda d: tokenize(f"<{args.lang}><asr>"),  
-}
+        "speech": lambda d: to_speech(d),
+        # Model output format is: "<eng><asr> Text..."
+        "text": lambda d: tokenize(f"<{args.lang}><asr> {get_transcript(d)}"),
+        "text_prev": lambda d: tokenize("<na>"),
+        "text_ctc": lambda d: tokenize(get_transcript(d)),
+        "prefix": lambda d: tokenize(f"<{args.lang}><asr>"),
+    }
+    
     print("\n[2/4] Loading datasets...")
     train_raw = torchaudio.datasets.LIBRISPEECH(
         str(args.data_dir), url="train-clean-100", download=False
@@ -76,12 +91,13 @@ def main():
     valid_raw = torchaudio.datasets.LIBRISPEECH(
         str(args.data_dir), url="dev-clean", download=False
     )
-
+    
     train_dataset = ez.dataset.ESPnetEZDataset(train_raw, data_info=data_info)
     valid_dataset = ez.dataset.ESPnetEZDataset(valid_raw, data_info=data_info)
     
     print(f"Train: {len(train_dataset)} samples")
     print(f"Valid: {len(valid_dataset)} samples")
+    
     print("\n[3/4] Configuring training...")
     finetune_config = ez.config.update_finetune_config(
         "s2t",
@@ -90,12 +106,13 @@ def main():
     )
     print(f"Epochs: {finetune_config.get('max_epoch')}")
     print(f"Batch size: {finetune_config.get('batch_size')}")
-
+    
     def build_model_fn(args):
         model = pretrained_model.s2t_model
         model.train()
         print(f"Trainable parameters: {count_trainable(model):,}")
         return model
+    
     print("\n[4/4] Initializing trainer...")
     trainer = ez.Trainer(
         task='s2t',

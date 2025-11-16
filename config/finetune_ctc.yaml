@@ -12,13 +12,13 @@ num_workers: 4
 cudnn_benchmark: true
 cudnn_deterministic: false
 use_tensorboard: true
-log_interval: 50          
+log_interval: 50      
 
 batch_type: unsorted
 batch_size: 8     
 accum_grad: 2            
 
-max_epoch: 20
+max_epoch: 2
 num_iters_per_epoch: 2000
 patience: 5             
 keep_nbest_models: 3      

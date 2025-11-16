@@ -182,20 +182,17 @@ class MoEPositionwiseFFN(nn.Module):
             [ExpertFFN(d_model, hidden, dropout=dropout, activation=activation)
              for _ in range(n_experts)]
         )
-
         self.last_aux_loss: Optional[torch.Tensor] = None  # retrieved by trainer
 
     def forward(self, x_btd: torch.Tensor) -> torch.Tensor:
         B, T, D = x_btd.shape
         x = x_btd.reshape(B * T, D) 
         N = x.shape[0]
-
         # Router picks experts
         r = self.router(x, training=self.training)
         ids = r.topk_ids         
         gates = r.topk_gates     
         mask = r.mask            
-
         # Collect per-expert token indices
         y = x.new_zeros((N, D))
         for e in range(self.n_experts):
@@ -218,7 +215,6 @@ class MoEPositionwiseFFN(nn.Module):
 
         # Store aux loss for the trainer to consume
         self.last_aux_loss = r.aux_loss
-
         return y.reshape(B, T, D)
 
 

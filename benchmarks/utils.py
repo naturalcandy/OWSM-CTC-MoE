@@ -55,6 +55,14 @@ def reset():
 
 
 def normalize_text(text: str) -> str:
+    special_tokens = [
+        "<notimestamps>", "<timestamps>",
+        "<eng>", "<spa>", "<fra>", "<deu>",
+        "<asr>", "<st>",
+        "<na>",
+    ]
+    for token in special_tokens:
+        text = text.replace(token, "")
     text = text.lower()
     text = re.sub(r'[^\w\s]', '', text)
     text = ' '.join(text.split())

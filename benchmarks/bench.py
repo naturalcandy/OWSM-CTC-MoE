@@ -39,12 +39,14 @@ class BaselineBenchmark:
     def __init__(
         self,
         model_name: str = "espnet/owsm_ctc_v4_1B",
+        model_path: str = None,
         device: str = "cuda",
         data_dir: str = "data/librispeech",
         results_dir: str = "results/baseline",
         use_flash_attn: bool = True,
     ):
         self.model_name = model_name
+        self.model_path = model_path
         self.device = device
         self.data_dir = Path(data_dir)
         self.results_dir = Path(results_dir)
@@ -54,26 +56,65 @@ class BaselineBenchmark:
         
         # DOES BF16 WORK?
         print(f"Loading OWSM-CTC model: {model_name}")
+        if model_path:
+            print(f"Loading fine-tuned model from: {model_path}")
+            self._load_finetuned_model(model_path)
+        else:
+            print(f"Loading baseline OWSM-CTC model: {model_name}")
+            self._load_baseline_model(model_name)
         
-        if use_flash_attn:
+        print(f"Model loaded")
+        print(f"Flash Attention: {use_flash_attn}")
+        print(f"Device: {device}")
+    
+    def _load_baseline_model(self, model_name: str):
+        """Load baseline model from HuggingFace."""
+        if self.use_flash_attn:
             self.model = Speech2TextGreedySearch.from_pretrained(
                 model_name,
-                device=device,
+                device=self.device,
                 lang_sym="<eng>",
                 task_sym="<asr>",
-                use_flash_attn=True,
-                dtype="float16",
             )
         else:
             self.model = Speech2TextGreedySearch.from_pretrained(
                 model_name,
-                device=device,
+                device=self.device,
                 lang_sym="<eng>",
                 task_sym="<asr>",
             )
-        print(f"Model loaded")
-        print(f"Flash Attention: {use_flash_attn}")
-        print(f"Device: {device}")
+
+    def _load_finetuned_model(self, model_path: str):
+        """Load fine-tuned model from checkpoint."""
+        checkpoint_dir = Path(model_path).parent
+        config_path = checkpoint_dir / "config.yaml"
+        
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"config.yaml not found in {checkpoint_dir}. "
+                f"Make sure your checkpoint directory contains config.yaml"
+            )
+        
+        print(f"Using checkpoint: {model_path}")
+        print(f"Using config: {config_path}")
+        
+        # Adjust later...
+        if self.use_flash_attn:
+            self.model = Speech2TextGreedySearch.from_pretrained(
+                s2t_model_file=model_path,
+                s2t_train_config=str(config_path),
+                device=self.device,
+                lang_sym="<eng>",
+                task_sym="<asr>",
+            )
+        else:
+            self.model = Speech2TextGreedySearch.from_pretrained(
+                s2t_model_file=model_path,
+                s2t_train_config=str(config_path),
+                device=self.device,
+                lang_sym="<eng>",
+                task_sym="<asr>",
+            )
         
     def load_librispeech_subset(
         self, 
@@ -95,9 +136,7 @@ class BaselineBenchmark:
         for i, (waveform, sample_rate, transcript, _, _, _) in enumerate(
             tqdm(dataset, desc=f"Loading {split}")
         ):
-            transcript_norm = normalize_text(transcript)
-            samples.append((waveform[0].numpy(), sample_rate, transcript_norm))
-            
+            samples.append((waveform[0].numpy(), sample_rate, transcript))
             if max_samples and i + 1 >= max_samples:
                 break
         
@@ -123,17 +162,18 @@ class BaselineBenchmark:
                 result = self.model(audio)
 
                 hyp_text = extract_output(result)
+                ref_text_norm = normalize_text(ref_text)
                 hyp_text_norm = normalize_text(hyp_text)
 
-                if i == 0:
-                    print(f"\n=== DEBUG FIRST SAMPLE ===")
-                    print(f"Reference (raw): '{ref_text}'")
-                    print(f"Hypothesis (raw): '{hyp_text}'")
-                    print(f"Hypothesis (norm): '{hyp_text_norm}'")
-                    print(f"Match? {ref_text == hyp_text_norm}")
-                    print(f"==========================\n")
+                #if i < 20:
+                 #   print(f"\n=== DEBUG FIRST SAMPLE ===")
+                  #  print(f"Reference (raw): '{ref_text}'")
+                   # print(f"Hypothesis (raw): '{hyp_text}'")
+                    #print(f"Hypothesis (norm): '{hyp_text_norm}'")
+                    #print(f"Match? {ref_text_norm == hyp_text_norm}")
+                    #print(f"==========================\n")
                 
-                ref.append(ref_text)
+                ref.append(ref_text_norm)
                 hyp.append(hyp_text_norm)
         # Calculate WER
         wer_score = get_wer(ref, hyp)
@@ -251,6 +291,7 @@ class BaselineBenchmark:
         results = {
             "timestamp": timestamp,
             "model": self.model_name,
+            "model_path": self.model_path if self.model_path else "baseline",
             "device": self.device,
             "use_flash_attn": self.use_flash_attn,
             "wer": {},
@@ -267,7 +308,8 @@ class BaselineBenchmark:
             split="test-clean",
             num_samples=500,
         )
-        results_file = self.results_dir / f"baseline_results_{timestamp}.json"
+        model_type = "finetuned" if self.model_path else "baseline"
+        results_file = self.results_dir / f"{model_type}_results_{timestamp}.json"
         with open(results_file, "w") as f:
             json.dump(results, f, indent=2)
         
@@ -287,6 +329,12 @@ def main():
         type=str,
         default="espnet/owsm_ctc_v4_1B",
         help="Model name",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Path to the model checkpoint (overrides model name if provided)",
     )
     parser.add_argument(
         "--device",
@@ -323,6 +371,7 @@ def main():
     
     benchmark = BaselineBenchmark(
         model_name=args.model,
+        model_path=args.model_path,
         device=args.device,
         data_dir=args.data_dir,
         results_dir=args.results_dir,
