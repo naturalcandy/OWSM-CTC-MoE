@@ -86,7 +86,7 @@ class BaselineBenchmark:
                 task_sym="<asr>",
             )
         
-        # TEMPORARY: Inject MoE into last 9 layers for testing
+        '''# TEMPORARY: Inject MoE into last 9 layers for testing
         print("\n" + "="*60)
         print("INJECTING MoE INTO LAST 9 LAYERS")
         print("="*60)
@@ -114,39 +114,85 @@ class BaselineBenchmark:
         print(f"Moving model to device: {self.device}")
         self.model.s2t_model.to(self.device)
         self.model.s2t_model.eval()
-        print("="*60 + "\n")
+        print("="*60 + "\n")'''
 
     def _load_finetuned_model(self, model_path: str):
-        """Load fine-tuned model from checkpoint."""
-        checkpoint_dir = Path(model_path).parent
-        config_path = checkpoint_dir / "config.yaml"
+        """Load fine-tuned MoE model from checkpoint."""
+        from moe.moe_ffn import MoEPositionwiseFFN
         
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"config.yaml not found in {checkpoint_dir}. "
-                f"Make sure your checkpoint directory contains config.yaml"
-            )
+        checkpoint_path = Path(model_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {model_path}")
         
-        print(f"Using checkpoint: {model_path}")
-        print(f"Using config: {config_path}")
+        print(f"Loading MoE fine-tuned model from: {model_path}")
         
-        # Adjust later...
-        if self.use_flash_attn:
-            self.model = Speech2TextGreedySearch.from_pretrained(
-                s2t_model_file=model_path,
-                s2t_train_config=str(config_path),
-                device=self.device,
-                lang_sym="<eng>",
-                task_sym="<asr>",
-            )
+        print("Step 1: Loading base OWSM-CTC model...")
+        self.model = Speech2TextGreedySearch.from_pretrained(
+            self.model_name,
+            device=self.device, 
+            lang_sym="<eng>",
+            task_sym="<asr>",
+        )
+        
+        # We inject MoE layers after loading the base model
+        print("Step 2: Injecting MoE layers into last 9 encoder layers...")
+        encoder = self.model.s2t_model.encoder
+        num_layers = len(encoder.encoders)
+        target_layers = list(range(num_layers - 9, num_layers))
+        
+        inject_moe(
+            encoder,
+            n_experts=8,
+            top_k=1,
+            capacity_factor=2.5,  # Match training config
+            noisy_gate_std=0.25,
+            use_noisy_gating=False,  # Disable noise for inference
+            layers=target_layers,
+            replace_macaron=True,
+            init_from_pretrained=False,  # We'll load weights from checkpoint
+            init_noise_std=0.0,
+            verbose=True,
+        )
+        
+        # Then we can load checkpoint weights
+        print(f"Step 3: Loading checkpoint weights...")
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        
+        # ESPnet saves model state_dict under different keys
+        if isinstance(checkpoint, dict):
+            if "model" in checkpoint:
+                state_dict = checkpoint["model"]
+            elif "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            else:
+                state_dict = checkpoint
         else:
-            self.model = Speech2TextGreedySearch.from_pretrained(
-                s2t_model_file=model_path,
-                s2t_train_config=str(config_path),
-                device=self.device,
-                lang_sym="<eng>",
-                task_sym="<asr>",
-            )
+            state_dict = checkpoint
+        
+        # Load the state dict
+        missing, unexpected = self.model.s2t_model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"Warning: Missing keys: {len(missing)}")
+            for k in missing[:5]:
+                print(f"  - {k}")
+        if unexpected:
+            print(f"Warning: Unexpected keys: {len(unexpected)}")
+            for k in unexpected[:5]:
+                print(f"  - {k}")
+        
+        # Step 4: Move ENTIRE model to device and set eval mode
+        print(f"Step 4: Moving model to {self.device}...")
+        # Move the s2t_model
+        self.model.s2t_model.to(self.device)
+        self.model.s2t_model.eval()
+        # Update the device attribute used by Speech2TextGreedySearch
+        self.model.device = self.device
+        if hasattr(self.model, 'beam_search') and self.model.beam_search is not None:
+            self.model.beam_search.to(self.device)
+        moe_count = sum(1 for m in self.model.s2t_model.encoder.modules() 
+                        if isinstance(m, MoEPositionwiseFFN))
+        print(f"Verified: {moe_count} MoE layers loaded")
+        print("MoE model loaded successfully!")
         
     def load_librispeech_subset(
         self, 

@@ -3,12 +3,17 @@ Fine-tune OWSM-CTC v4 1B on LibriSpeech train-clean-100
 """
 import argparse
 from pathlib import Path
+import sys
 import numpy as np
 import torch
 import torchaudio
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 import espnetez as ez
 from espnet2.bin.s2t_inference_ctc import Speech2TextGreedySearch
+
+from moe.moe_ffn import MoEPositionwiseFFN
 
 # Sourced from EspnetEZ finetuning tutorial:
 # https://espnet.github.io/espnet/notebook/ESPnetEZ/ASR/ASR_finetune_owsm.html
@@ -26,6 +31,8 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--lang", type=str, default="eng")
     parser.add_argument("--config", type=Path, default=Path("config/finetune_ctc.yaml"))
+    parser.add_argument("--inject_moe", action="store_true")
+
     args = parser.parse_args()
     
     args.exp_dir.mkdir(parents=True, exist_ok=True)
@@ -106,9 +113,40 @@ def main():
     )
     print(f"Epochs: {finetune_config.get('max_epoch')}")
     print(f"Batch size: {finetune_config.get('batch_size')}")
+
+    use_moe = args.inject_moe
     
     def build_model_fn(args):
         model = pretrained_model.s2t_model
+        if use_moe and not any(isinstance(m, MoEPositionwiseFFN) 
+                           for m in model.encoder.modules()):
+            from moe.patch import inject_moe
+            from moe.moe_ctc import MoEESPnetS2TCTCModel
+            print("\nInjecting MoE layers into last 9 encoder layers...")
+            num_layers = len(model.encoder.encoders)
+            target_layers = list(range(num_layers - 9, num_layers))
+            inject_moe(
+                model.encoder,
+                n_experts=8,
+                top_k=1,
+                capacity_factor=2.5, 
+                noisy_gate_std=0.25,
+                use_noisy_gating=True,
+                layers=target_layers,
+                replace_macaron=True,
+                init_from_pretrained=True,
+                init_noise_std=0.01,
+                verbose=True,
+            )
+            print("MoE injection complete.\n")
+            moe_count = sum(1 for m in model.encoder.modules() 
+                            if isinstance(m, MoEPositionwiseFFN))
+            print(f"Verified: {moe_count} MoE layers injected")
+            assert moe_count == len(target_layers) * 2, "MoE injection count mismatch!"
+            # we also need to incorpoate auxiliary loss for MoE during training
+            model.__class__ = MoEESPnetS2TCTCModel
+            model.moe_aux_weight = 0.01
+
         model.train()
         print(f"Trainable parameters: {count_trainable(model):,}")
         return model
