@@ -21,6 +21,7 @@ from tqdm import tqdm
 from espnet2.bin.s2t_inference_ctc import Speech2TextGreedySearch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from moe.patch import inject_moe
 
 from utils import (
     Timer,
@@ -69,6 +70,7 @@ class BaselineBenchmark:
     
     def _load_baseline_model(self, model_name: str):
         """Load baseline model from HuggingFace."""
+        # TODO: ADJUST FOR FLASH ATTENTION LATER
         if self.use_flash_attn:
             self.model = Speech2TextGreedySearch.from_pretrained(
                 model_name,
@@ -83,6 +85,36 @@ class BaselineBenchmark:
                 lang_sym="<eng>",
                 task_sym="<asr>",
             )
+        
+        # TEMPORARY: Inject MoE into last 9 layers for testing
+        print("\n" + "="*60)
+        print("INJECTING MoE INTO LAST 9 LAYERS")
+        print("="*60)
+        encoder = self.model.s2t_model.encoder
+        num_layers = len(encoder.encoders)
+        last_9_layers = list(range(num_layers - 9, num_layers))
+        print(f"Total layers: {num_layers}")
+        print(f"Injecting MoE into layers: {last_9_layers}")
+        
+        inject_moe(
+            encoder,
+            n_experts=8,
+            top_k=1,
+            capacity_factor=1.25,
+            noisy_gate_std=1.0,
+            use_noisy_gating=False,  # inference mode
+            layers=last_9_layers,
+            replace_macaron=True,
+            init_from_pretrained=True,
+            init_noise_std=0.0,  # inference mode
+            verbose=True,
+        )
+        
+        # Move MoE layers to the correct device
+        print(f"Moving model to device: {self.device}")
+        self.model.s2t_model.to(self.device)
+        self.model.s2t_model.eval()
+        print("="*60 + "\n")
 
     def _load_finetuned_model(self, model_path: str):
         """Load fine-tuned model from checkpoint."""
@@ -197,8 +229,8 @@ class BaselineBenchmark:
     def test_latency(
         self,
         split: str = "test-clean",
-        num_samples: int = 500,
-        warmup: int = 10,
+        num_samples: int = 1000,
+        warmup: int = 50,
     ) -> Dict:
         """
         Test per-utterance latency with batch_size=1.
@@ -362,7 +394,7 @@ def main():
     parser.add_argument(
         "--test",
         type=str,
-        choices=["wer", "latency", "throughput", "all"],
+        choices=["wer", "latency", "throughput", "all", "perf"],
         default="all",
         help="Which test to run",
     )
@@ -388,6 +420,10 @@ def main():
         results = benchmark.test_latency()
     elif args.test == "throughput":
         results = benchmark.test_throughput()
+    elif args.test == "perf":
+        results = {}
+        results["latency"] = benchmark.test_latency()
+        results["throughput"] = benchmark.test_throughput()
     
     print("\n" + "="*60)
     print("Benchmark complete!")
