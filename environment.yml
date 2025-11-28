@@ -28,3 +28,4 @@ dependencies:
       - editdistance       # For CER calculation
       - kaldiio            # ESPnet dependency
       - scipy              # For audio processing
+      - datasets<4.0.0     # For FLEURS
