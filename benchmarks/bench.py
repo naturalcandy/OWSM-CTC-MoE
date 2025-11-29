@@ -33,6 +33,19 @@ from utils import (
     extract_output
 )
 
+FLEURS_LANGUAGES = {
+    # Finetuning languages
+    "es_419": ("spa", "romance", "train"),
+    "pt_br": ("por", "romance", "train"),
+    "pl_pl": ("pol", "slavic", "train"),
+    "cs_cz": ("ces", "slavic", "train"),
+    # Held-out languages
+    "it_it": ("ita", "romance", "heldout"),
+    "fr_fr": ("fra", "romance", "heldout"),
+    "sk_sk": ("slk", "slavic", "heldout"),
+    "hr_hr": ("hrv", "slavic", "heldout"),
+}
+
 
 class BaselineBenchmark:
     """Benchmark suite for OWSM-CTC baseline model."""
@@ -221,6 +234,45 @@ class BaselineBenchmark:
         print(f"Loaded {len(samples)} samples from {split}")
         return samples
     
+    def load_fleurs_subset(
+        self,
+        fleurs_code: str,
+        split: str = "test",
+        max_samples: int = None,
+        cache_dir: str = "data/fleurs",
+    ) -> List[Tuple[np.ndarray, int, str]]:
+        """
+        Load FLEURS dataset for a specific language. 
+        """
+        from datasets import load_dataset
+        
+        if fleurs_code not in FLEURS_LANGUAGES:
+            raise ValueError(f"Unknown FLEURS language: {fleurs_code}")
+        
+        iso3, family, role = FLEURS_LANGUAGES[fleurs_code]
+        print(f"\nLoading FLEURS {fleurs_code} ({iso3}) - {split}...")
+        
+        dataset = load_dataset(
+            "google/fleurs",
+            fleurs_code,
+            split=split,
+            cache_dir=cache_dir,
+            trust_remote_code=True,
+        )
+        
+        samples = []
+        for i, sample in enumerate(tqdm(dataset, desc=f"Loading {fleurs_code}")):
+            audio = np.array(sample["audio"]["array"], dtype=np.float32)
+            sr = sample["audio"]["sampling_rate"]
+            transcript = sample["transcription"]
+            samples.append((audio, sr, transcript))
+            
+            if max_samples and i + 1 >= max_samples:
+                break
+        
+        print(f"Loaded {len(samples)} samples from {fleurs_code} ({split})")
+        return samples
+    
     def test_wer(
         self, 
         split: str = "test-clean",
@@ -270,6 +322,131 @@ class BaselineBenchmark:
         print(f"WER: {results['wer_percent']:.2f}%")
         print(f"Peak Memory: {results['peak_memory_mb']:.1f} MB")
         print(f"{'='*60}")
+        return results
+    
+    def test_wer_fleurs(
+        self,
+        fleurs_code: str,
+        split: str = "test",
+        max_samples: int = None,
+        cache_dir: str = "data/fleurs",
+    ) -> Dict:
+        """
+        Test Word Error Rate on a FLEURS language. 
+        """
+        if fleurs_code not in FLEURS_LANGUAGES:
+            raise ValueError(f"Unknown FLEURS language: {fleurs_code}")
+        
+        iso3, family, role = FLEURS_LANGUAGES[fleurs_code]
+        
+        print(f"\n{'='*60}")
+        print(f"FLEURS WER Test: {fleurs_code} ({iso3}) - {family}")
+        print(f"{'='*60}")
+        
+        # Update model's language symbol for this language
+        self.model.lang_sym = f"<{iso3}>"
+        
+        samples = self.load_fleurs_subset(fleurs_code, split, max_samples, cache_dir)
+        reset()
+        
+        ref = []
+        hyp = []
+        
+        with torch.inference_mode():
+            for i, (audio, sr, ref_text) in enumerate(tqdm(samples, desc="Inference")):
+                result = self.model(audio)
+                
+                hyp_text = extract_output(result)
+                ref_text_norm = normalize_text(ref_text)
+                hyp_text_norm = normalize_text(hyp_text)
+                
+                ref.append(ref_text_norm)
+                hyp.append(hyp_text_norm)
+        
+        wer_score = get_wer(ref, hyp)
+        memory_mb = get_gpu_memory_mb()
+        
+        results = {
+            "fleurs_code": fleurs_code,
+            "iso3": iso3,
+            "family": family,
+            "role": role,
+            "split": split,
+            "num_samples": len(samples),
+            "wer_percent": round(wer_score, 2),
+            "peak_memory_mb": round(memory_mb, 2),
+        }
+        
+        print(f"\n{'='*60}")
+        print(f"FLEURS WER Results: {fleurs_code} ({iso3})")
+        print(f"{'='*60}")
+        print(f"Family: {family} | Role: {role}")
+        print(f"Samples: {results['num_samples']}")
+        print(f"WER: {results['wer_percent']:.2f}%")
+        print(f"Peak Memory: {results['peak_memory_mb']:.1f} MB")
+        print(f"{'='*60}")
+        
+        return results
+    
+
+    def run_fleurs_baseline(
+        self,
+        languages: List[str] = None,
+        split: str = "test",
+        max_samples: int = None,
+        cache_dir: str = "data/fleurs",
+    ) -> Dict:
+        """
+        Run WER evaluation on multiple FLEURS languages. 
+        """
+        from datetime import datetime
+        
+        if languages is None:
+            languages = list(FLEURS_LANGUAGES.keys())
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        results = {
+            "timestamp": timestamp,
+            "model": self.model_name,
+            "model_path": self.model_path if self.model_path else "baseline",
+            "split": split,
+            "languages": {},
+        }
+        
+        for fleurs_code in languages:
+            results["languages"][fleurs_code] = self.test_wer_fleurs(
+                fleurs_code=fleurs_code,
+                split=split,
+                max_samples=max_samples,
+                cache_dir=cache_dir,
+            )
+        
+        # Summary by family
+        print(f"\n{'='*60}")
+        print("FLEURS BASELINE SUMMARY")
+        print(f"{'='*60}")
+        
+        for family in ["romance", "slavic"]:
+            for role in ["train", "heldout"]:
+                langs = [k for k, v in FLEURS_LANGUAGES.items() 
+                        if v[1] == family and v[2] == role and k in results["languages"]]
+                if langs:
+                    avg_wer = np.mean([results["languages"][l]["wer_percent"] for l in langs])
+                    print(f"{family.capitalize()} ({role}): {avg_wer:.2f}% WER")
+                    for l in langs:
+                        iso3 = FLEURS_LANGUAGES[l][0]
+                        wer_val = results["languages"][l]["wer_percent"]
+                        print(f"  - {l} ({iso3}): {wer_val:.2f}%")
+        
+        # Save results
+        model_type = "finetuned" if self.model_path else "baseline"
+        results_file = self.results_dir / f"fleurs_{model_type}_{timestamp}.json"
+        with open(results_file, "w") as f:
+            json.dump(results, f, indent=2)
+        
+        print(f"\nResults saved to: {results_file}")
+        
         return results
     
     def test_latency(
@@ -400,7 +577,7 @@ class BaselineBenchmark:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark OWSM-CTC baseline model"
+        description="Benchmark OWSM-CTC"
     )
     parser.add_argument(
         "--model",
@@ -427,6 +604,12 @@ def main():
         help="LibriSpeech data directory",
     )
     parser.add_argument(
+        "--fleurs_dir",
+        type=str,
+        default="data/fleurs",
+        help="FLEURS cache directory",
+    )
+    parser.add_argument(
         "--results_dir",
         type=str,
         default="results/baseline",
@@ -440,9 +623,22 @@ def main():
     parser.add_argument(
         "--test",
         type=str,
-        choices=["wer", "latency", "throughput", "all", "perf"],
+        choices=["wer", "latency", "throughput", "all", "perf", "fleurs"],
         default="all",
         help="Which test to run",
+    )
+    parser.add_argument(
+        "--fleurs_langs",
+        type=str,
+        nargs="+",
+        default=None,
+        help="FLEURS language codes to test (e.g., es_419 pl_pl)",
+    )
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Max samples per language (for quick testing)",
     )
     
     args = parser.parse_args()
@@ -470,6 +666,13 @@ def main():
         results = {}
         results["latency"] = benchmark.test_latency()
         results["throughput"] = benchmark.test_throughput()
+    elif args.test == "fleurs":
+        results = benchmark.run_fleurs_baseline(
+            languages=args.fleurs_langs,
+            split="test",
+            max_samples=args.max_samples,
+            cache_dir=args.fleurs_dir,
+        )
     
     print("\n" + "="*60)
     print("Benchmark complete!")

@@ -58,8 +58,9 @@ def normalize_text(text: str) -> str:
     special_tokens = [
         "<notimestamps>", "<timestamps>",
         "<eng>", "<spa>", "<fra>", "<deu>",
-        "<asr>", "<st>",
-        "<na>",
+        "<por>", "<pol>", "<ces>", "<ita>",
+        "<slk>", "<hrv>", "<asr>", "<st>",
+        "<na>", "<bos>", "<eos>",
     ]
     for token in special_tokens:
         text = text.replace(token, "")
