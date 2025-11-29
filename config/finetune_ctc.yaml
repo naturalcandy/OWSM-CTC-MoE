@@ -1,4 +1,4 @@
-# Hardware: A100 40GB - OWSM-CTC 1B fine-tuning on LibriSpeech-100h
+# Hardware: A100 80GB - OWSM-CTC 1B fine-tuning on LibriSpeech-100h
 
 seed: 2025
 train_dtype: float32    
@@ -9,19 +9,22 @@ allow_variable_data_keys: true
 
 ngpu: 1
 num_workers: 4
-cudnn_benchmark: true
-cudnn_deterministic: false
+cudnn_benchmark: false
+cudnn_deterministic: true
 use_tensorboard: true
-log_interval: 50      
+log_interval: 50     
+ 
+keep_nbest_models: 1
+save_checkpoint_every_n_epochs: 1
+
 
 batch_type: unsorted
-batch_size: 8     
+batch_size: 14    
 accum_grad: 2            
 
-max_epoch: 2
+max_epoch: 25
 num_iters_per_epoch: 2000
 patience: 5             
-keep_nbest_models: 3      
 val_scheduler_criterion:
   - valid
   - loss
