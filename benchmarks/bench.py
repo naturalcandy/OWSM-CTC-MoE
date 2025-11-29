@@ -502,28 +502,36 @@ class BaselineBenchmark:
         self,
         split: str = "test-clean",
         num_samples: int = 500,
+        warmup: int = 50,
     ) -> Dict:
         """
-        Test throughput (utterances/second) processing entire batch at once.
+        Test throughput (utterances/second) (sequential processing).
         """
         print(f"\n{'='*60}")
         print(f"Throughput Test: {split}")
         print(f"{'='*60}")
-        samples = self.load_librispeech_subset(split, num_samples)
+        samples = self.load_librispeech_subset(split, num_samples + warmup)
         reset()
+        # Warmup
+        with torch.inference_mode():
+            for audio, sr, _ in samples[:warmup]:
+                _ = self.model(audio)
+        
+        test_samples = samples[warmup:]
         timer = Timer(device=self.device)
         with torch.inference_mode(), timer:
-            for audio, sr, _ in tqdm(samples, desc="Processing"):
+            for audio, sr, _ in test_samples:
                 _ = self.model(audio)
         total_time = timer.elapsed
-        throughput = len(samples) / total_time
+        throughput = len(test_samples) / total_time
         memory_mb = get_gpu_memory_mb()
         results = {
             "split": split,
-            "num_samples": len(samples),
+            "num_samples": len(test_samples),
+            "warmup_samples": warmup,
             "total_time_sec": round(total_time, 2),
             "throughput_utt_per_sec": round(throughput, 2),
-            "time_per_utt_ms": round((total_time / len(samples)) * 1000, 2),
+            "time_per_utt_ms": round((total_time / len(test_samples)) * 1000, 2),
             "peak_memory_mb": round(memory_mb, 2),
         }
         
