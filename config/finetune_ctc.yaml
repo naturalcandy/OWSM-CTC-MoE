@@ -15,15 +15,14 @@ use_tensorboard: true
 log_interval: 50     
  
 keep_nbest_models: 1
-save_checkpoint_every_n_epochs: 1
 
 
 batch_type: unsorted
-batch_size: 14    
-accum_grad: 2            
+batch_size: 8  
+accum_grad: 2
 
 max_epoch: 25
-num_iters_per_epoch: 2000
+num_iters_per_epoch: 800
 patience: 5             
 val_scheduler_criterion:
   - valid
@@ -35,16 +34,16 @@ best_model_criterion:
 
 optim: adamw
 optim_conf:
-  lr: 0.0001              
+  lr: 0.00003              
   betas: [0.9, 0.98]
   eps: 1.0e-06
-  weight_decay: 1.0e-06
+  weight_decay: 0.01
   fused: true
 
 scheduler: piecewiselinearwarmuplr
 scheduler_conf:
-  warmup_steps_list: [0, 2000, 10000]
-  warmup_lr_list: [0.0, 2.5e-05, 0.0001]
+  warmup_steps_list: [0, 400, 1600]
+  warmup_lr_list: [0.0, 6.0e-06, 0.00003]
 
 grad_clip: 5.0
 grad_clip_type: 2.0   

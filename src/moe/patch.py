@@ -71,12 +71,13 @@ def inject_moe(
     capacity_factor: float = 1.2,
     noisy_gate_std: float = 1.0,
     use_noisy_gating: bool = True,
+    expert_dropout: float = 0.0, 
     layers: Optional[Sequence[int]] = None,
     replace_macaron: bool = True,
     init_from_pretrained: bool = True,
     init_noise_std: float = 0.0,
     verbose: bool = True,
-    use_expert_batching: bool = False,  # not used
+    use_lang_bias: bool = True,
 ):
     """Replace FFNs with MoEPositionwiseFFN in an OWSM-CTC E-Branchformer encoder."""
     enc_layers: Iterable[nn.Module] = encoder.encoders
@@ -101,16 +102,16 @@ def inject_moe(
                 capacity_factor=capacity_factor,
                 noisy_gate_std=noisy_gate_std,
                 use_noisy_gating=use_noisy_gating,
+                expert_dropout=expert_dropout,
+                use_lang_bias=use_lang_bias,
             )
 
-            # Initialize experts from pretrained FFN weights
             if init_from_pretrained:
                 _init_experts_from_ffn(
                     moe, old_ffn, init_noise_std, verbose and idx == 0
                 )
 
             block.feed_forward = moe
-
             if verbose:
                 init_msg = (
                     " (init from pretrained)"
@@ -136,6 +137,8 @@ def inject_moe(
                 capacity_factor=capacity_factor,
                 noisy_gate_std=noisy_gate_std,
                 use_noisy_gating=use_noisy_gating,
+                expert_dropout=expert_dropout,
+                use_lang_bias=use_lang_bias,
             )
             # Initialize experts from pretrained FFN weights
             if init_from_pretrained:

@@ -95,6 +95,8 @@ class NoisyTopKRouter(nn.Module):
         noisy_gate_std: float = 1.0,
         capacity_factor: float = 1.2,
         use_noisy_gating: bool = True,
+        expert_dropout: float = 0.0,
+        use_lang_bias: bool = False,
     ):
         super().__init__()
         assert top_k >= 1
@@ -104,13 +106,22 @@ class NoisyTopKRouter(nn.Module):
         self.capacity_factor = capacity_factor
         self.use_noisy_gating = use_noisy_gating
         self.router = nn.Linear(d_model, n_experts, bias=True)
+        self.expert_dropout = expert_dropout
+        self.use_lang_bias = use_lang_bias
+        if use_lang_bias:
+            # Bias
+            init_bias = torch.tensor([
+                [ 0.15, -0.15,  0.15, -0.15],  
+                [-0.15,  0.15, -0.15,  0.15],  
+            ])
+            self.register_buffer('lang_bias', init_bias)
 
     @torch.no_grad()
     def _per_expert_capacity(self, n_tokens: int) -> int:
         # From switch transformer paper
         return int(math.ceil(self.capacity_factor * n_tokens / self.n_experts))
 
-    def forward(self, x: torch.Tensor, training: bool) -> RouterOutputs:
+    def forward(self, x: torch.Tensor, training: bool, lang_families: torch.Tensor = None) -> RouterOutputs:
         # Cast to float32 for numerical stability during mixed precision training
         # (recall in section 2.4 of Switch Transformer paper)
         original_dtype = x.dtype
@@ -119,7 +130,19 @@ class NoisyTopKRouter(nn.Module):
 
         # logits is (N,E) for N tokens and E experts
         logits = self.router(x)
+        if self.use_lang_bias and lang_families is not None:
+            bias = self.lang_bias[lang_families]  # (N,) -> (N, E)
+            logits = logits + bias
+        
         # (our noisy gating)
+        if training and self.expert_dropout > 0.0:
+            mask = torch.rand(self.n_experts, device=x.device) > self.expert_dropout
+            
+            # For safety
+            if mask.sum() == 0:
+                mask[torch.randint(0, self.n_experts, (1,)).item()] = True
+            logits = logits.masked_fill(~mask, -1e9)
+
         if training and self.use_noisy_gating and self.noisy_gate_std > 0.0:
             noise = torch.randn_like(logits) * self.noisy_gate_std
             logits = logits + noise
@@ -188,7 +211,6 @@ class NoisyTopKRouter(nn.Module):
         # For expert distribution stats
         expert_counts = load.clone().detach()
         router_probs = (probs.mean(dim=0)).detach()
-        tokens_dropped = int((~keep_mask).sum().item())
 
         return RouterOutputs(
             topk_ids=topk_ids.long(),
@@ -225,6 +247,8 @@ class MoEPositionwiseFFN(nn.Module):
         use_noisy_gating: bool = True,
         use_expert_batching: bool = False,  # not used currently
         block_size: int = 128,  # not used currently
+        expert_dropout: float = 0.0,
+        use_lang_bias: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
@@ -241,6 +265,8 @@ class MoEPositionwiseFFN(nn.Module):
             noisy_gate_std=noisy_gate_std,
             capacity_factor=capacity_factor,
             use_noisy_gating=use_noisy_gating,
+            expert_dropout=expert_dropout,
+            use_lang_bias=use_lang_bias,
         )
 
         # Here we use stacked weights instead of a module list of experts
@@ -285,9 +311,11 @@ class MoEPositionwiseFFN(nn.Module):
     def forward(self, x_btd: torch.Tensor) -> torch.Tensor:
         B, T, D = x_btd.shape
         x = x_btd.reshape(B * T, D)
-
+        lang_families = None
+        if hasattr(self, 'current_lang_families') and self.current_lang_families is not None:
+            lang_families = self.current_lang_families.repeat_interleave(T)
         # Router picks experts
-        r = self.router(x, training=self.training)
+        r = self.router(x, training=self.training, lang_families=lang_families)
         ids = r.topk_ids
         gates = r.topk_gates
         mask = r.mask
@@ -482,7 +510,6 @@ def collect_moe_aux_loss(module: nn.Module) -> torch.Tensor:
 
 
 def collect_moe_stats(module: nn.Module) -> Dict[str, float]:
-    """Collect expert utilization stats from all MoE layers for logging."""
     stats = {}
 
     total_expert_counts = None
@@ -501,13 +528,11 @@ def collect_moe_stats(module: nn.Module) -> Dict[str, float]:
                     break
 
             if layer_num is not None:
-                # Macaron vs main ffn.
                 if "macaron" in name:
                     prefix = f"moe_enc{layer_num}_macaron_"
                 else:
                     prefix = f"moe_enc{layer_num}_ffn_"
             else:
-                # Fallback if we can't parse
                 prefix = f"moe_{name.replace('. ', '_')}_"
 
             counts = m.last_expert_counts.detach().cpu()
@@ -534,7 +559,6 @@ def collect_moe_stats(module: nn.Module) -> Dict[str, float]:
             if mean_count > 0:
                 stats[f"{prefix}load_cv"] = (counts.float().std() / mean_count).item()
 
-            # Aggregate
             if total_expert_counts is None:
                 total_expert_counts = counts.clone()
             else:

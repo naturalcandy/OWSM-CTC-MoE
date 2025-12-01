@@ -4,6 +4,7 @@ Fine-tune OWSM-CTC v4 1B on LibriSpeech train-clean-100
 import argparse
 from pathlib import Path
 import sys
+import random
 import numpy as np
 import torch
 import torchaudio
@@ -39,7 +40,7 @@ class MultilingualFLEURSDataset:
     Combined dataset for multiple FLEURS languages.
     """
     
-    def __init__(self, language_codes: list, split: str, cache_dir: str):
+    def __init__(self, language_codes: list, split: str, cache_dir: str, shuffle: bool = True):
         self.samples = []
         # index -> iso3 code
         self.lang_map = {}  
@@ -64,6 +65,11 @@ class MultilingualFLEURSDataset:
                 self.lang_map[idx] = iso3
                 idx += 1
             print(f"    -> {len(ds)} samples")
+        
+        if shuffle:
+            random.shuffle(self.samples)
+            print(f"  Shuffled samples for language mixing")
+        
         print(f"  Total: {len(self.samples)} samples")
 
     def __len__(self):
@@ -93,18 +99,22 @@ def main():
     parser.add_argument("--lang", type=str, default="eng")
     parser.add_argument("--config", type=Path, default=Path("config/finetune_ctc.yaml"))
     parser.add_argument("--inject_moe", action="store_true")
-    parser.add_argument("--dataset", type=str, choices=["librispeech", "fleurs"], 
-                        default="librispeech")
+    parser.add_argument("--use_dataset", type=str, choices=["librispeech", "fleurs"], 
+                        default="librispeech", help="Dataset to use for finetuning")
     parser.add_argument("--fleurs_dir", type=Path, default=Path("data/fleurs"))
     parser.add_argument("--fleurs_langs", type=str, nargs="+", default=None)
 
     args = parser.parse_args()
     
+    random.seed(2025)
+    np.random.seed(2025)
+    torch.manual_seed(2025)
+    
     args.exp_dir.mkdir(parents=True, exist_ok=True)
     args.stats_dir.mkdir(parents=True, exist_ok=True)
     
     print("="*80)
-    if args.dataset == "librispeech":
+    if args.use_dataset == "librispeech":
         print("OWSM-CTC Fine-tuning on LibriSpeech-100h")
     else:
         print("OWSM-CTC Fine-tuning on Multilingual FLEURS")
@@ -130,7 +140,7 @@ def main():
 
     print("\n[2/4] Loading datasets...")
 
-    if args.dataset == "librispeech":
+    if args.use_dataset == "librispeech":
         def to_speech(sample):
             waveform, sample_rate, transcript, *_ = sample
             audio = waveform[0].numpy().astype(np.float32)
@@ -166,7 +176,7 @@ def main():
         train_dataset = ez.dataset.ESPnetEZDataset(train_raw, data_info=data_info)
         valid_dataset = ez.dataset.ESPnetEZDataset(valid_raw, data_info=data_info)
     
-    elif args.dataset == "fleurs":
+    elif args.use_dataset == "fleurs":
         train_langs = args.fleurs_langs if args.fleurs_langs else TRAIN_LANGUAGES
         print(f"Training languages: {train_langs}")
         for lang in train_langs:
@@ -178,6 +188,7 @@ def main():
             language_codes=train_langs,
             split="train",
             cache_dir=str(args.fleurs_dir),
+            shuffle=True,  # Mix languages in batches
         )
         
         print("\nLoading validation set:")
@@ -185,6 +196,7 @@ def main():
             language_codes=train_langs,
             split="validation",
             cache_dir=str(args.fleurs_dir),
+            shuffle=False,  # Keep validation order consistent
         )
         
         # FLEURS data_info (language is per-sample)
@@ -225,34 +237,76 @@ def main():
     
     def build_model_fn(args):
         model = pretrained_model.s2t_model
+        
         if use_moe and not any(isinstance(m, MoEPositionwiseFFN) 
-                           for m in model.encoder.modules()):
+                        for m in model.encoder.modules()):
             from moe.patch import inject_moe
             from moe.moe_ctc import MoEESPnetS2TCTCModel
-            print("\nInjecting MoE layers into last 9 encoder layers...")
+            
+            print("\n" + "="*60)
+            print("INJECTING MOE + FREEZING EARLY LAYERS")
+            print("="*60)
+            
             num_layers = len(model.encoder.encoders)
             target_layers = list(range(num_layers - 9, num_layers))
+            
             inject_moe(
                 model.encoder,
-                n_experts=8,
+                n_experts=4,
                 top_k=1,
-                capacity_factor=2.5, 
-                noisy_gate_std=0.25,
+                capacity_factor=2.0,
+                noisy_gate_std=1.5,
+                expert_dropout=0.0,
                 use_noisy_gating=True,
                 layers=target_layers,
-                replace_macaron=True,
+                replace_macaron=False,
                 init_from_pretrained=True,
                 init_noise_std=0.01,
                 verbose=True,
+                use_lang_bias=True,
             )
             print("MoE injection complete.\n")
+            
+            # Verify MoE count
             moe_count = sum(1 for m in model.encoder.modules() 
                             if isinstance(m, MoEPositionwiseFFN))
             print(f"Verified: {moe_count} MoE layers injected")
-            assert moe_count == len(target_layers) * 2, "MoE injection count mismatch!"
-            # we also need to incorpoate auxiliary loss for MoE during training
+            
+            # Set up MoE model class for aux loss
             model.__class__ = MoEESPnetS2TCTCModel
             model.moe_aux_weight = 0.01
+            model._lang_token_to_family = {}  # Initialize before calling set_language_token_mapping
+            model.use_lang_bias = True
+            model.set_language_token_mapping(tokenizer, converter)
+            
+            '''
+            Freeze early layers to force MoE specialization
+            print("\n" + "-"*60)
+            print("FREEZING STRATEGY: Train last 3 layers + CTC only")
+            print("-"*60)
+            
+            # Freeze everything first
+            for param in model.parameters():
+                param.requires_grad = False
+            
+            # Unfreeze last 3 encoder layers (these have MoE)
+            for idx in target_layers:
+                for param in model.encoder.encoders[idx].parameters():
+                    param.requires_grad = True
+            
+            # Unfreeze CTC head
+            for param in model.ctc.parameters():
+                param.requires_grad = True
+            
+            # Report parameter counts
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+            total = trainable + frozen
+            
+            print(f"Total params:     {total:,}")
+            print(f"Trainable params: {trainable:,} ({100*trainable/total:.1f}%)")
+            print(f"Frozen params:    {frozen:,} ({100*frozen/total:.1f}%)")
+            print("="*60 + "\n")'''
 
         model.train()
         print(f"Trainable parameters: {count_trainable(model):,}")
@@ -277,7 +331,7 @@ def main():
     
     print("="*80)
     print("TRAINING START")
-    if args.dataset == "fleurs":
+    if args.use_dataset == "fleurs":
         train_langs = args.fleurs_langs if args.fleurs_langs else TRAIN_LANGUAGES
         print(f"Languages: {train_langs}")
     print(f"Monitor: tensorboard --logdir {args.exp_dir}/tensorboard")

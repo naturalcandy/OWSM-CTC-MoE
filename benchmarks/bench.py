@@ -54,6 +54,7 @@ class BaselineBenchmark:
         self,
         model_name: str = "espnet/owsm_ctc_v4_1B",
         model_path: str = None,
+        dense: bool = False,
         device: str = "cuda",
         data_dir: str = "data/librispeech",
         results_dir: str = "results/baseline",
@@ -61,6 +62,7 @@ class BaselineBenchmark:
     ):
         self.model_name = model_name
         self.model_path = model_path
+        self.dense = dense
         self.device = device
         self.data_dir = Path(data_dir)
         self.results_dir = Path(results_dir)
@@ -71,8 +73,12 @@ class BaselineBenchmark:
         # DOES BF16 WORK?
         print(f"Loading OWSM-CTC model: {model_name}")
         if model_path:
-            print(f"Loading fine-tuned model from: {model_path}")
-            self._load_finetuned_model(model_path)
+            if dense:
+                print(f"Loading dense fine-tuned model from: {model_path}")
+                self._load_dense_finetuned_model(model_path)
+            else:
+                print(f"Loading MoE fine-tuned model from: {model_path}")
+                self._load_moe_finetuned_model(model_path)
         else:
             print(f"Loading baseline OWSM-CTC model: {model_name}")
             self._load_baseline_model(model_name)
@@ -129,7 +135,45 @@ class BaselineBenchmark:
         self.model.s2t_model.eval()
         print("="*60 + "\n")'''
 
-    def _load_finetuned_model(self, model_path: str):
+    def _load_dense_finetuned_model(self, model_path: str):
+        checkpoint_path = Path(model_path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {model_path}")
+        
+        print("Loading base OWSM-CTC model...")
+        self.model = Speech2TextGreedySearch.from_pretrained(
+            self.model_name,
+            device=self.device, 
+            lang_sym="<eng>",
+            task_sym="<asr>",
+        )
+        
+        print(f"Loading checkpoint weights from {model_path}...")
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        
+        if isinstance(checkpoint, dict):
+            if "model" in checkpoint:
+                state_dict = checkpoint["model"]
+            elif "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            else:
+                state_dict = checkpoint
+        else:
+            state_dict = checkpoint
+        
+        missing, unexpected = self.model.s2t_model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"Warning: Missing keys: {len(missing)}")
+        if unexpected:
+            print(f"Warning: Unexpected keys: {len(unexpected)}")
+        
+        print(f"Moving model to {self.device}...")
+        self.model.s2t_model.to(self.device)
+        self.model.s2t_model.eval()
+        self.model.device = self.device
+        print("Dense fine-tuned model loaded successfully!")
+
+    def _load_moe_finetuned_model(self, model_path: str):
         """Load fine-tuned MoE model from checkpoint."""
         from moe.moe_ffn import MoEPositionwiseFFN
         
@@ -139,7 +183,7 @@ class BaselineBenchmark:
         
         print(f"Loading MoE fine-tuned model from: {model_path}")
         
-        print("Step 1: Loading base OWSM-CTC model...")
+        print("Loading base OWSM-CTC model...")
         self.model = Speech2TextGreedySearch.from_pretrained(
             self.model_name,
             device=self.device, 
@@ -148,30 +192,29 @@ class BaselineBenchmark:
         )
         
         # We inject MoE layers after loading the base model
-        print("Step 2: Injecting MoE layers into last 9 encoder layers...")
+        print("Injecting MoE layers...")
         encoder = self.model.s2t_model.encoder
         num_layers = len(encoder.encoders)
         target_layers = list(range(num_layers - 9, num_layers))
         
         inject_moe(
             encoder,
-            n_experts=8,
+            n_experts=4,
             top_k=1,
-            capacity_factor=2.5,  # Match training config
-            noisy_gate_std=0.25,
-            use_noisy_gating=False,  # Disable noise for inference
+            capacity_factor=2.0,  # Be sure to match training config
+            noisy_gate_std=0.00,
+            use_noisy_gating=False,  # Disable for inference
             layers=target_layers,
-            replace_macaron=True,
+            replace_macaron=False,
             init_from_pretrained=False,  # We'll load weights from checkpoint
             init_noise_std=0.0,
             verbose=True,
+            use_lang_bias=True,
         )
         
-        # Then we can load checkpoint weights
-        print(f"Step 3: Loading checkpoint weights...")
+        print(f"Loading checkpoint weights...")
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
-        # ESPnet saves model state_dict under different keys
         if isinstance(checkpoint, dict):
             if "model" in checkpoint:
                 state_dict = checkpoint["model"]
@@ -193,8 +236,7 @@ class BaselineBenchmark:
             for k in unexpected[:5]:
                 print(f"  - {k}")
         
-        # Step 4: Move ENTIRE model to device and set eval mode
-        print(f"Step 4: Moving model to {self.device}...")
+        print(f"Moving model to {self.device}...")
         # Move the s2t_model
         self.model.s2t_model.to(self.device)
         self.model.s2t_model.eval()
@@ -205,7 +247,7 @@ class BaselineBenchmark:
         moe_count = sum(1 for m in self.model.s2t_model.encoder.modules() 
                         if isinstance(m, MoEPositionwiseFFN))
         print(f"Verified: {moe_count} MoE layers loaded")
-        print("MoE model loaded successfully!")
+        print("MoE model loaded successfully")
         
     def load_librispeech_subset(
         self, 
@@ -334,6 +376,7 @@ class BaselineBenchmark:
         """
         Test Word Error Rate on a FLEURS language. 
         """
+        from moe.moe_ffn import MoEPositionwiseFFN
         if fleurs_code not in FLEURS_LANGUAGES:
             raise ValueError(f"Unknown FLEURS language: {fleurs_code}")
         
@@ -345,6 +388,10 @@ class BaselineBenchmark:
         
         # Update model's language symbol for this language
         self.model.lang_sym = f"<{iso3}>"
+        family_id = 0 if family == "romance" else 1
+        for m in self.model.s2t_model.encoder.modules():
+            if isinstance(m, MoEPositionwiseFFN):
+                m.current_lang_families = torch.tensor([family_id], device=self.device)
         
         samples = self.load_fleurs_subset(fleurs_code, split, max_samples, cache_dir)
         reset()
@@ -600,6 +647,11 @@ def main():
         help="Path to the model checkpoint (overrides model name if provided)",
     )
     parser.add_argument(
+        "--dense",
+        action="store_true",
+        help="Checkpoint is a dense (non-MoE) fine-tuned model",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda",
@@ -654,6 +706,7 @@ def main():
     benchmark = BaselineBenchmark(
         model_name=args.model,
         model_path=args.model_path,
+        dense=args.dense,
         device=args.device,
         data_dir=args.data_dir,
         results_dir=args.results_dir,
