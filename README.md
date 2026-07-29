@@ -1,6 +1,7 @@
 # OWSM-CTC MoE
 
-Fine-tuning OWSM-CTC with Mixture-of-Experts for efficient speech recognition.
+Sparse Mixture-of-Experts upcycling of OWSM-CTC v4 (1B) for efficient multilingual speech recognition.
+[OWSM-CTC-MoE Paper](OWSM_CTC_MoE.pdf)
 
 ## Requirements
 
@@ -31,9 +32,7 @@ conda activate owsm-ctc-moe
 ```
 
 ### 4. Install Flash Attention (Optional)
-Flash Attention provides **2-4x training speedup**.
-**Skip this step if using V100 or older GPUs.**
-
+Flash Attention provides significant training speedup if your hardware supports it.
 
 In your conda environment run: 
 ```bash
